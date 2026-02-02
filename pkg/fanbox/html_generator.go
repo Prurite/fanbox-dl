@@ -13,6 +13,16 @@ import (
 	"github.com/hareku/go-strlimit"
 )
 
+// Language represents the language for HTML generation
+type Language string
+
+const (
+	LanguageSimplifiedChinese  Language = "zh-CN"
+	LanguageTraditionalChinese Language = "zh-TW"
+	LanguageJapanese           Language = "ja"
+	LanguageEnglish            Language = "en"
+)
+
 // HTMLGenerator generates HTML pages from FANBOX posts
 type HTMLGenerator struct {
 	Enable                   bool
@@ -20,6 +30,69 @@ type HTMLGenerator struct {
 	DirByPlan                bool
 	RemoveUnprintableChars   bool
 	SaveDir                  string
+	Language                 Language
+}
+
+// i18nTexts holds translations for different languages
+type i18nTexts struct {
+	PublishedTime string
+	Author        string
+	CreatorID     string
+	Fee           string
+	PostID        string
+	Source        string
+	Images        string
+	Files         string
+}
+
+// getI18nTexts returns translated texts based on the language setting
+func (hg *HTMLGenerator) getI18nTexts() i18nTexts {
+	switch hg.Language {
+	case LanguageTraditionalChinese:
+		return i18nTexts{
+			PublishedTime: "發布時間",
+			Author:        "作者",
+			CreatorID:     "創作者ID",
+			Fee:           "費用",
+			PostID:        "貼文ID",
+			Source:        "來源",
+			Images:        "圖片",
+			Files:         "文件",
+		}
+	case LanguageJapanese:
+		return i18nTexts{
+			PublishedTime: "公開日時",
+			Author:        "作者",
+			CreatorID:     "クリエイターID",
+			Fee:           "料金",
+			PostID:        "投稿ID",
+			Source:        "ソース",
+			Images:        "画像",
+			Files:         "ファイル",
+		}
+	case LanguageEnglish:
+		return i18nTexts{
+			PublishedTime: "Published",
+			Author:        "Author",
+			CreatorID:     "Creator ID",
+			Fee:           "Fee",
+			PostID:        "Post ID",
+			Source:        "Source",
+			Images:        "Images",
+			Files:         "Files",
+		}
+	default: // LanguageSimplifiedChinese
+		return i18nTexts{
+			PublishedTime: "发布时间",
+			Author:        "作者",
+			CreatorID:     "创作者ID",
+			Fee:           "费用",
+			PostID:        "贴文ID",
+			Source:        "来源",
+			Images:        "图片",
+			Files:         "文件",
+		}
+	}
 }
 
 // limitOsSafely limits the string length for OS safely (copied from LocalStorage)
@@ -56,11 +129,20 @@ func (hg *HTMLGenerator) GenerateHTML(post Post, creatorName string) string {
 		return ""
 	}
 
+	// Get language-specific texts
+	texts := hg.getI18nTexts()
+
+	// Set default language if not specified
+	if hg.Language == "" {
+		hg.Language = LanguageSimplifiedChinese
+	}
+
 	var sb strings.Builder
 
-	// HTML header
-	sb.WriteString(`<!DOCTYPE html html lang="zh-CN">`)
-	sb.WriteString("\n<html>\n<head>\n")
+	// HTML header with language attribute
+	sb.WriteString(fmt.Sprintf(`<!DOCTYPE html>
+<html lang="%s">`, hg.Language))
+	sb.WriteString("\n<head>\n")
 	sb.WriteString(`<meta charset="UTF-8">`)
 	sb.WriteString("\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">")
 	sb.WriteString(fmt.Sprintf("\n<title>%s - %s</title>", html.EscapeString(creatorName), html.EscapeString(post.Title)))
@@ -135,20 +217,20 @@ h2 {
 	// Meta information
 	publishedTime, _ := time.Parse(time.RFC3339, post.PublishedDateTime)
 	fmt.Fprintln(&sb, "<div class=\"post-meta\">")
-	sb.WriteString(fmt.Sprintf("发布时间: %s<br>\n", publishedTime.Format("2006/01/02 15:04")))
-	sb.WriteString(fmt.Sprintf("作者: %s<br>\n", html.EscapeString(creatorName)))
-	sb.WriteString(fmt.Sprintf("创作者ID: %s<br>\n", post.CreatorID))
+	sb.WriteString(fmt.Sprintf("%s: %s<br>\n", texts.PublishedTime, publishedTime.Format("2006/01/02 15:04")))
+	sb.WriteString(fmt.Sprintf("%s: %s<br>\n", texts.Author, html.EscapeString(creatorName)))
+	sb.WriteString(fmt.Sprintf("%s: %s<br>\n", texts.CreatorID, post.CreatorID))
 	if post.FeeRequired > 0 {
-		sb.WriteString(fmt.Sprintf("费用: %d円<br>\n", post.FeeRequired))
+		sb.WriteString(fmt.Sprintf("%s: %d円<br>\n", texts.Fee, post.FeeRequired))
 	}
-	sb.WriteString(fmt.Sprintf("贴文ID: %s\n", post.ID))
+	sb.WriteString(fmt.Sprintf("%s: %s\n", texts.PostID, post.ID))
 	sb.WriteString("</div>\n")
 
 	// Content
 	sb.WriteString("<div class=\"content\">\n")
 
 	if post.Body != nil {
-		hg.generateBodyContent(&sb, post)
+		hg.generateBodyContent(&sb, post, texts)
 	}
 
 	// Add plain text if available
@@ -163,8 +245,8 @@ h2 {
 
 	// Footer
 	sb.WriteString(`<div class="footer">`)
-	sb.WriteString(fmt.Sprintf("<p>来源: <a href=\"https://www.fanbox.cc/@%s/posts/%s\" target=\"_blank\">https://www.fanbox.cc/@%s/posts/%s</a></p>\n",
-		post.CreatorID, post.ID, post.CreatorID, post.ID))
+	sb.WriteString(fmt.Sprintf("<p>%s: <a href=\"https://www.fanbox.cc/@%s/posts/%s\" target=\"_blank\">https://www.fanbox.cc/@%s/posts/%s</a></p>\n",
+		texts.Source, post.CreatorID, post.ID, post.CreatorID, post.ID))
 	sb.WriteString("</div>\n")
 
 	sb.WriteString("</body>\n</html>")
@@ -173,15 +255,15 @@ h2 {
 }
 
 // generateBodyContent generates HTML content from post body
-func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post) {
+func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post, texts i18nTexts) {
 	if post.Body.Blocks != nil {
-		hg.generateBlocksHTML(sb, post)
+		hg.generateBlocksHTML(sb, post, texts)
 	}
 
 	// Handle image-type posts
 	if post.Body.Images != nil && len(*post.Body.Images) > 0 {
 		sb.WriteString("<div class=\"images-section\">\n")
-		sb.WriteString("<h2>图片</h2>\n")
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", texts.Images))
 		for i, img := range *post.Body.Images {
 			imgOrder := i
 			imgName := hg.getImageFileName(post, imgOrder, img)
@@ -194,7 +276,7 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post) {
 	// Handle file-type posts
 	if post.Body.Files != nil && len(*post.Body.Files) > 0 {
 		sb.WriteString("<div class=\"files-section\">\n")
-		sb.WriteString("<h2>文件</h2>\n")
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", texts.Files))
 		for i, file := range *post.Body.Files {
 			fileOrder := i
 			fileName := hg.getFileFileName(post, fileOrder, file)
@@ -213,7 +295,7 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post) {
 }
 
 // generateBlocksHTML generates HTML from blog-type blocks
-func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post) {
+func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post, texts i18nTexts) {
 	// Track order for images and files separately
 	imageOrder := 0
 	fileOrder := 0

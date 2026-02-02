@@ -155,6 +155,12 @@ var saveHTMLFlag = &cli.BoolFlag{
 	Usage: "Whether to generate HTML pages for posts.",
 }
 
+var htmlLanguageFlag = &cli.StringFlag{
+	Name:  "html-language",
+	Value: "zh-CN",
+	Usage: "Language for HTML generation (zh-CN, zh-TW, ja, en). Default: zh-CN",
+}
+
 var downloadGigafilesFlag = &cli.BoolFlag{
 	Name:  "download-gigafiles",
 	Value: false,
@@ -205,6 +211,7 @@ var app = &cli.App{
 		rateLimitFlag,
 		saveJSONFlag,
 		saveHTMLFlag,
+		htmlLanguageFlag,
 		downloadGigafilesFlag,
 		useStateManagerFlag,
 		startDateFlag,
@@ -299,8 +306,9 @@ var app = &cli.App{
 				DirByPlan:              c.Bool(dirByPlanFlag.Name),
 				RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
 				SaveDir:                c.String(saveDirFlag.Name),
+				Language:               fanbox.Language(c.String(htmlLanguageFlag.Name)),
 			}
-			slog.Info("HTML generation enabled")
+			slog.Info("HTML generation enabled", "language", c.String(htmlLanguageFlag.Name))
 		}
 
 		var gigafileDownloader *fanbox.GigafileDownloader

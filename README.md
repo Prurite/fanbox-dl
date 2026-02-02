@@ -52,6 +52,7 @@ The latest binary can be downloaded [here](https://github.com/hareku/fanbox-dl/r
 | start-date | Only download posts published on or after this date. Format: YYYY-MM-DD | `--start-date 2023-01-01` | `NULL` |
 | end-date | Only download posts published on or before this date. Format: YYYY-MM-DD | `--end-date 2023-12-31` | `NULL` |
 | save-html | Generate HTML pages for downloaded posts. | `--save-html` | `false` |
+| html-language | Language for HTML generation (zh-CN, zh-TW, ja, en). | `--html-language ja` | `zh-CN` |
 | download-gigafiles | Automatically download files from gigafile.nu links in post content. | `--download-gigafiles` | `false` |
 | use-state-manager | Use state manager to track downloaded posts (creates LastSavePostId.json). | `--use-state-manager` | `false` |
 
