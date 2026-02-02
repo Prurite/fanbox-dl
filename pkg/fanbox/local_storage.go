@@ -371,15 +371,13 @@ func (s *LocalStorage) makeHTMLFileName(post Post) string {
 	}
 
 	if s.DirByPost {
-		// [SaveDirectory]/[CreatorID]/[PlanDir]/[yyyy]-[MM]-[dd]-[HHmmss] (postId) title.html
+		// [SaveDirectory]/[CreatorID]/[PlanDir]/[PostDir]/post.html
 		return filepath.Join(
 			s.SaveDir,
 			post.CreatorID,
 			planDir,
-			fmt.Sprintf("[%s] (%s) %s.html",
-				date.UTC().Format("2006-01-02-150405"),
-				post.ID,
-				s.limitOsSafely(title)),
+			s.limitOsSafely(fmt.Sprintf("%s-%s", date.UTC().Format("2006-01-02"), title)),
+			"post.html",
 		)
 	}
 

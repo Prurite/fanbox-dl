@@ -332,11 +332,8 @@ func (hg *HTMLGenerator) getFileFileName(post Post, order int, file File) string
 }
 
 // GetHTMLFileName generates the filename for the HTML file
-func GetHTMLFileName(saveDir string, post Post, creatorName string) string {
+func (hg *HTMLGenerator) GetHTMLFileName(saveDir string, post Post, creatorName string) string {
 	publishedTime, _ := time.Parse(time.RFC3339, post.PublishedDateTime)
-
-	// Format: [yyyy-MM-dd-HHmmss] (postId) title.html
-	formattedTime := publishedTime.Format("2006-01-02-150405")
 
 	// Sanitize title for filename
 	title := strings.TrimSpace(post.Title)
@@ -354,7 +351,20 @@ func GetHTMLFileName(saveDir string, post Post, creatorName string) string {
 		title = title[:100]
 	}
 
+	planDir := ""
+	if hg.DirByPlan {
+		planDir = fmt.Sprintf("%dyen", post.FeeRequired)
+	}
+
+	if hg.DirByPost {
+		// [SaveDirectory]/[CreatorID]/[PlanDir]/[PostDir]/post.html
+		postDir := hg.limitOsSafely(fmt.Sprintf("%s-%s", publishedTime.UTC().Format("2006-01-02"), title))
+		return filepath.Join(saveDir, post.CreatorID, planDir, postDir, "post.html")
+	}
+
+	// [SaveDirectory]/[CreatorID]/[PlanDir]/[yyyy-MM-dd-HHmmss] (postId) title.html
+	formattedTime := publishedTime.Format("2006-01-02-150405")
 	filename := fmt.Sprintf("[%s] (%s) %s.html", formattedTime, post.ID, title)
 
-	return filepath.Join(saveDir, filename)
+	return filepath.Join(saveDir, post.CreatorID, planDir, filename)
 }
