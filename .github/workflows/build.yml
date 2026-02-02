@@ -38,7 +38,7 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: build --clean --snapshot --skip=validate
+          args: release --clean --snapshot --skip=publish --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -46,7 +46,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-artifacts
-          path: dist/*
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums*.txt
           retention-days: 30
 
   release:
@@ -71,5 +74,31 @@ jobs:
           distribution: goreleaser
           version: latest
           args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dev-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist
+
+      - name: Publish dev release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: dev
+          prerelease: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums*.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

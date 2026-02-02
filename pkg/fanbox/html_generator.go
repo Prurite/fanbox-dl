@@ -263,7 +263,7 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post, tex
 	// Handle image-type posts
 	if post.Body.Images != nil && len(*post.Body.Images) > 0 {
 		sb.WriteString("<div class=\"images-section\">\n")
-		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", texts.Images))
+		fmt.Fprintf(sb, "<h2>%s</h2>\n", texts.Images)
 		for i, img := range *post.Body.Images {
 			imgOrder := i
 			imgName := hg.getImageFileName(post, imgOrder, img)
@@ -276,7 +276,7 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post, tex
 	// Handle file-type posts
 	if post.Body.Files != nil && len(*post.Body.Files) > 0 {
 		sb.WriteString("<div class=\"files-section\">\n")
-		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", texts.Files))
+		fmt.Fprintf(sb, "<h2>%s</h2>\n", texts.Files)
 		for i, file := range *post.Body.Files {
 			fileOrder := i
 			fileName := hg.getFileFileName(post, fileOrder, file)
@@ -304,18 +304,18 @@ func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post, text
 		switch block.Type {
 		case "header":
 			if block.Text != "" {
-				sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", html.EscapeString(block.Text)))
+				fmt.Fprintf(sb, "<h2>%s</h2>\n", html.EscapeString(block.Text))
 			}
 		case "p":
 			if block.Text != "" {
-				sb.WriteString(fmt.Sprintf("<p>%s</p>\n", html.EscapeString(block.Text)))
+				fmt.Fprintf(sb, "<p>%s</p>\n", html.EscapeString(block.Text))
 			}
 		case "image":
 			if block.ImageID != nil && post.Body.ImageMap != nil {
 				if img, ok := (*post.Body.ImageMap)[*block.ImageID]; ok {
 					imgName := hg.getImageFileName(post, imageOrder, img)
 					imgPath := hg.getRelativePath(imgName)
-					sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgPath), html.EscapeString(filepath.Base(imgName))))
+					fmt.Fprintf(sb, "<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgPath), html.EscapeString(filepath.Base(imgName)))
 					imageOrder++
 				}
 			}
@@ -325,11 +325,11 @@ func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post, text
 					fileName := hg.getFileFileName(post, fileOrder, file)
 					displayName := fmt.Sprintf("%s.%s", hg.cleanDisplayName(file.Name), file.Extension)
 					filePath := hg.getRelativePath(fileName)
-					sb.WriteString(fmt.Sprintf("<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(filePath), html.EscapeString(displayName)))
+					fmt.Fprintf(sb, "<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(filePath), html.EscapeString(displayName))
 
 					// If it's an image file, also embed it
 					if isImageExtension(file.Extension) {
-						sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(filePath), html.EscapeString(displayName)))
+						fmt.Fprintf(sb, "<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(filePath), html.EscapeString(displayName))
 					}
 					fileOrder++
 				}
