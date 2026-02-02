@@ -90,9 +90,11 @@ func (s *LocalStorage) SaveText(post Post) error {
 
 	file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0775)
 	if err != nil {
-		return fmt.Errorf("open a file: %w", err)
+		return fmt.Errorf("open file to save text: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	_, err = file.WriteString(textContent)
 	if err != nil {

@@ -10,7 +10,8 @@ import (
 
 // HTMLGenerator generates HTML pages from FANBOX posts
 type HTMLGenerator struct {
-	Enable bool
+	Enable    bool
+	DirByPost bool
 }
 
 // GenerateHTML generates an HTML page from a post and returns the HTML content
@@ -97,7 +98,7 @@ h2 {
 
 	// Meta information
 	publishedTime, _ := time.Parse(time.RFC3339, post.PublishedDateTime)
-	sb.WriteString(fmt.Sprintf("<div class=\"post-meta\">\n"))
+	fmt.Fprintln(&sb, "<div class=\"post-meta\">")
 	sb.WriteString(fmt.Sprintf("发布时间: %s<br>\n", publishedTime.Format("2006/01/02 15:04")))
 	sb.WriteString(fmt.Sprintf("作者: %s<br>\n", html.EscapeString(creatorName)))
 	sb.WriteString(fmt.Sprintf("创作者ID: %s<br>\n", post.CreatorID))
@@ -148,7 +149,8 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post) {
 		for i, img := range *post.Body.Images {
 			imgOrder := i + 1
 			imgName := fmt.Sprintf("%d.%s", imgOrder, img.Extension)
-			sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgName), html.EscapeString(imgName)))
+			imgPath := hg.getRelativePath(imgName)
+			fmt.Fprintf(sb, "<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgPath), html.EscapeString(imgName))
 		}
 		sb.WriteString("</div>\n")
 	}
@@ -157,13 +159,15 @@ func (hg *HTMLGenerator) generateBodyContent(sb *strings.Builder, post Post) {
 	if post.Body.Files != nil && len(*post.Body.Files) > 0 {
 		sb.WriteString("<div class=\"files-section\">\n")
 		sb.WriteString("<h2>文件</h2>\n")
-		for _, file := range *post.Body.Files {
+		for i, file := range *post.Body.Files {
+			fileOrder := i + 1
 			fileName := fmt.Sprintf("%s.%s", file.Name, file.Extension)
-			sb.WriteString(fmt.Sprintf("<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(fileName), html.EscapeString(fileName)))
+			filePath := hg.getRelativePath(fmt.Sprintf("file-%d-%s.%s", fileOrder, file.Name, file.Extension))
+			fmt.Fprintf(sb, "<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(filePath), html.EscapeString(fileName))
 
 			// If it's an image file, also embed it
 			if isImageExtension(file.Extension) {
-				sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(fileName), html.EscapeString(fileName)))
+				fmt.Fprintf(sb, "<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(filePath), html.EscapeString(fileName))
 			}
 		}
 		sb.WriteString("</div>\n")
@@ -186,18 +190,20 @@ func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post) {
 			if block.ImageID != nil && post.Body.ImageMap != nil {
 				if img, ok := (*post.Body.ImageMap)[*block.ImageID]; ok {
 					imgName := fmt.Sprintf("%s.%s", img.ID, img.Extension)
-					sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgName), html.EscapeString(imgName)))
+					imgPath := hg.getRelativePath(imgName)
+					sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(imgPath), html.EscapeString(imgName)))
 				}
 			}
 		case "file":
 			if block.FileID != nil && post.Body.FileMap != nil {
 				if file, ok := (*post.Body.FileMap)[*block.FileID]; ok {
 					fileName := fmt.Sprintf("%s.%s", file.Name, file.Extension)
-					sb.WriteString(fmt.Sprintf("<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(fileName), html.EscapeString(fileName)))
+					filePath := hg.getRelativePath(fileName)
+					sb.WriteString(fmt.Sprintf("<p><a href=\"%s\">%s</a></p>\n", html.EscapeString(filePath), html.EscapeString(fileName)))
 
 					// If it's an image file, also embed it
 					if isImageExtension(file.Extension) {
-						sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(fileName), html.EscapeString(fileName)))
+						sb.WriteString(fmt.Sprintf("<p><img src=\"%s\" alt=\"%s\"></p>\n", html.EscapeString(filePath), html.EscapeString(fileName)))
 					}
 				}
 			}
@@ -209,6 +215,15 @@ func (hg *HTMLGenerator) generateBlocksHTML(sb *strings.Builder, post Post) {
 func isImageExtension(ext string) bool {
 	ext = strings.ToLower(ext)
 	return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || ext == "webp" || ext == "bmp" || ext == "svg"
+}
+
+// getRelativePath returns the relative path for a file based on DirByPost setting
+// When DirByPost is true, files are in the same directory as HTML, so just use filename
+// When DirByPost is false, files are in the same directory as HTML, so just use filename
+func (hg *HTMLGenerator) getRelativePath(fileName string) string {
+	// For both DirByPost=true and DirByPost=false, HTML and files are in the same directory
+	// So we can use just the filename for relative linking
+	return fileName
 }
 
 // GetHTMLFileName generates the filename for the HTML file

@@ -149,12 +149,14 @@ This creates and uses:
 
 ```bash
 fanbox-dl \
-  --cookie "YOUR_COOKIE" \
+  --sessid "YOUR_COOKIE" \
   --save-dir "./downloads" \
   --dir-by-post \
   --save-html \
   --download-gigafiles \
   --use-state-manager \
+  --rate-limit 2.0 \
+  --save-json \
   --verbose
 ```
 

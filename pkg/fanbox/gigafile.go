@@ -92,7 +92,9 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 	if err != nil {
 		return fmt.Errorf("download file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
@@ -104,7 +106,9 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		_ = outFile.Close()
+	}()
 
 	_, err = io.Copy(outFile, resp.Body)
 	if err != nil {
@@ -129,7 +133,9 @@ func (g *GigafileDownloader) getCookieFromServer(ctx context.Context, urlStr str
 	if err != nil {
 		return "", fmt.Errorf("send head request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("head request failed with status %d", resp.StatusCode)
@@ -169,7 +175,9 @@ func (g *GigafileDownloader) getFilenameFromServer(ctx context.Context, urlStr s
 	if err != nil {
 		return "", fmt.Errorf("send head request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("head request failed with status %d", resp.StatusCode)
