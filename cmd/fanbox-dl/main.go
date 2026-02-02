@@ -293,7 +293,13 @@ var app = &cli.App{
 		// Initialize new features
 		var htmlGenerator *fanbox.HTMLGenerator
 		if c.Bool(saveHTMLFlag.Name) {
-			htmlGenerator = &fanbox.HTMLGenerator{Enable: true}
+			htmlGenerator = &fanbox.HTMLGenerator{
+				Enable:                 true,
+				DirByPost:              c.Bool(dirByPostFlag.Name),
+				DirByPlan:              c.Bool(dirByPlanFlag.Name),
+				RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
+				SaveDir:                c.String(saveDirFlag.Name),
+			}
 			slog.Info("HTML generation enabled")
 		}
 
