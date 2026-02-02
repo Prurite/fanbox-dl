@@ -112,9 +112,9 @@ var skipImages = &cli.BoolFlag{
 	Usage: "Whether to skip downloading images.",
 }
 var skipTexts = &cli.BoolFlag{
-    Name:  "skip-texts",
-    Value: false,
-    Usage: "Whether to skip downloading post contents as text files.",
+	Name:  "skip-texts",
+	Value: false,
+	Usage: "Whether to skip downloading post contents as text files.",
 }
 var dryRunFlag = &cli.BoolFlag{
 	Name:  "dry-run",
@@ -135,6 +135,36 @@ var removeUnprintableCharsFlag = &cli.BoolFlag{
 	Name:  "remove-unprintable-chars",
 	Value: false,
 	Usage: "Whether to remove unprintable characters from file names.",
+}
+
+var rateLimitFlag = &cli.Float64Flag{
+	Name:  "rate-limit",
+	Value: 0,
+	Usage: "Rate limit in requests per second (0 = no limit).",
+}
+
+var saveJSONFlag = &cli.BoolFlag{
+	Name:  "save-json",
+	Value: false,
+	Usage: "Whether to save original API JSON responses.",
+}
+
+var saveHTMLFlag = &cli.BoolFlag{
+	Name:  "save-html",
+	Value: false,
+	Usage: "Whether to generate HTML pages for posts.",
+}
+
+var downloadGigafilesFlag = &cli.BoolFlag{
+	Name:  "download-gigafiles",
+	Value: false,
+	Usage: "Whether to automatically download files from gigafile.nu links.",
+}
+
+var useStateManagerFlag = &cli.BoolFlag{
+	Name:  "use-state-manager",
+	Value: false,
+	Usage: "Whether to use state manager to track downloaded posts (creates LastSavePostId.json).",
 }
 
 var startDateFlag = &cli.StringFlag{
@@ -172,6 +202,11 @@ var app = &cli.App{
 		verboseFlag,
 		skipOnErrorFlag,
 		removeUnprintableCharsFlag,
+		rateLimitFlag,
+		saveJSONFlag,
+		saveHTMLFlag,
+		downloadGigafilesFlag,
+		useStateManagerFlag,
 		startDateFlag,
 		endDateFlag,
 	},
@@ -234,29 +269,64 @@ var app = &cli.App{
 		}
 		httpClient.HTTPClient.Transport = tlsTransp
 
+		storage := &fanbox.LocalStorage{
+			SaveDir:                c.String(saveDirFlag.Name),
+			DirByPost:              c.Bool(dirByPostFlag.Name),
+			DirByPlan:              c.Bool(dirByPlanFlag.Name),
+			RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
+			EnableSaveJSON:         c.Bool(saveJSONFlag.Name),
+			EnableSaveHTML:         c.Bool(saveHTMLFlag.Name),
+		}
+
 		api := &fanbox.OfficialAPIClient{
 			HTTPClient: httpClient,
 			Cookie:     cookieStr,
 			UserAgent:  c.String(userAgentFlag.Name),
 		}
 
-		client := &fanbox.Client{
-			CheckAllPosts:     c.Bool(allFlag.Name),
-			DryRun:            c.Bool(dryRunFlag.Name),
-			SkipFiles:         c.Bool(skipFiles.Name),
-			SkipImages:        c.Bool(skipImages.Name),
-			SkipTexts:         c.Bool(skipTexts.Name),
-			SkipOnError:       c.Bool(skipOnErrorFlag.Name),
-			OfficialAPIClient: api,
-			StartDate:         startDate,
-			EndDate:           endDate,
-			Storage: &fanbox.LocalStorage{
-				SaveDir:   c.String(saveDirFlag.Name),
-				DirByPost: c.Bool(dirByPostFlag.Name),
-				DirByPlan: c.Bool(dirByPlanFlag.Name),
+		// Set rate limit if specified
+		if rps := c.Float64(rateLimitFlag.Name); rps > 0 {
+			api.SetRateLimit(rps)
+			slog.Info("Rate limit enabled", "requests_per_second", rps)
+		}
 
-				RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
-			},
+		// Initialize new features
+		var htmlGenerator *fanbox.HTMLGenerator
+		if c.Bool(saveHTMLFlag.Name) {
+			htmlGenerator = &fanbox.HTMLGenerator{Enable: true}
+			slog.Info("HTML generation enabled")
+		}
+
+		var gigafileDownloader *fanbox.GigafileDownloader
+		if c.Bool(downloadGigafilesFlag.Name) {
+			gigafileDownloader = fanbox.NewGigafileDownloader(httpClient.HTTPClient, c.String(userAgentFlag.Name))
+			slog.Info("Gigafile auto-download enabled")
+		}
+
+		var stateManager *fanbox.StateManager
+		if c.Bool(useStateManagerFlag.Name) {
+			sm, err := fanbox.NewStateManager(".")
+			if err != nil {
+				return fmt.Errorf("create state manager: %w", err)
+			}
+			stateManager = sm
+			slog.Info("State manager enabled")
+		}
+
+		client := &fanbox.Client{
+			CheckAllPosts:      c.Bool(allFlag.Name),
+			DryRun:             c.Bool(dryRunFlag.Name),
+			SkipFiles:          c.Bool(skipFiles.Name),
+			SkipImages:         c.Bool(skipImages.Name),
+			SkipTexts:          c.Bool(skipTexts.Name),
+			SkipOnError:        c.Bool(skipOnErrorFlag.Name),
+			OfficialAPIClient:  api,
+			StartDate:          startDate,
+			EndDate:            endDate,
+			Storage:            storage,
+			HTMLGenerator:      htmlGenerator,
+			GigafileDownloader: gigafileDownloader,
+			StateManager:       stateManager,
 		}
 
 		ctx := c.Context

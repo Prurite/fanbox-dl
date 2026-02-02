@@ -20,6 +20,8 @@ type LocalStorage struct {
 	DirByPlan bool
 
 	RemoveUnprintableChars bool
+	EnableSaveJSON         bool
+	EnableSaveHTML         bool
 }
 
 func (s *LocalStorage) Save(post Post, order int, d Downloadable, r io.Reader) error {
@@ -103,6 +105,23 @@ func (s *LocalStorage) SaveText(post Post) error {
 // TextExists checks if the text file already exists
 func (s *LocalStorage) TextExists(post Post) (bool, error) {
 	_, err := os.Stat(s.makeTextFileName(post))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat file: %w", err)
+	}
+
+	return true, nil
+}
+
+// JSONExists checks if the JSON file already exists
+func (s *LocalStorage) JSONExists(post Post) (bool, error) {
+	if !s.EnableSaveJSON {
+		return false, nil
+	}
+
+	_, err := os.Stat(s.makeJSONFileName(post))
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -236,4 +255,162 @@ func (s *LocalStorage) makeTextFileName(post Post) string {
 		planDir,
 		s.limitOsSafely(fmt.Sprintf("%s-%s-post.txt", date.UTC().Format("2006-01-02"), title)),
 	)
+}
+
+// makeJSONFileName generates the filename for the JSON response
+func (s *LocalStorage) makeJSONFileName(post Post) string {
+	if !s.EnableSaveJSON {
+		return ""
+	}
+
+	date, err := time.Parse(time.RFC3339, post.PublishedDateTime)
+	if err != nil {
+		return ""
+	}
+
+	title := strings.TrimSpace(filename.EscapeString(post.Title, "-"))
+	if s.RemoveUnprintableChars {
+		title = strings.Map(func(r rune) rune {
+			if unicode.IsPrint(r) {
+				return r
+			}
+			return -1
+		}, title)
+	}
+
+	planDir := ""
+	if s.DirByPlan {
+		planDir = fmt.Sprintf("%dyen", post.FeeRequired)
+	}
+
+	if s.DirByPost {
+		// [SaveDirectory]/[CreatorID]/2006-01-02-[Post Title]/post.json
+		return filepath.Join(
+			s.SaveDir,
+			post.CreatorID,
+			planDir,
+			s.limitOsSafely(fmt.Sprintf("%s-%s", date.UTC().Format("2006-01-02"), title)),
+			"post.json",
+		)
+	}
+
+	// [SaveDirectory]/[CreatorID]/2006-01-02-[Post Title]-post.json
+	return filepath.Join(
+		s.SaveDir,
+		post.CreatorID,
+		planDir,
+		s.limitOsSafely(fmt.Sprintf("%s-%s-post.json", date.UTC().Format("2006-01-02"), title)),
+	)
+}
+
+// SaveJSON saves the original JSON response from the API
+func (s *LocalStorage) SaveJSON(post Post, jsonData []byte) error {
+	if !s.EnableSaveJSON {
+		return nil
+	}
+
+	name := s.makeJSONFileName(post)
+	if name == "" {
+		return nil
+	}
+
+	dir := filepath.Dir(name)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, 0775)
+		if err != nil {
+			return fmt.Errorf("create directory (%s): %w", dir, err)
+		}
+	}
+
+	return os.WriteFile(name, jsonData, 0664)
+}
+
+// HTMLExists checks if the HTML file already exists
+func (s *LocalStorage) HTMLExists(post Post) (bool, error) {
+	if !s.EnableSaveHTML {
+		return false, nil
+	}
+
+	_, err := os.Stat(s.makeHTMLFileName(post))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat file: %w", err)
+	}
+
+	return true, nil
+}
+
+// makeHTMLFileName generates the filename for the HTML file
+func (s *LocalStorage) makeHTMLFileName(post Post) string {
+	if !s.EnableSaveHTML {
+		return ""
+	}
+
+	date, err := time.Parse(time.RFC3339, post.PublishedDateTime)
+	if err != nil {
+		return ""
+	}
+
+	title := strings.TrimSpace(filename.EscapeString(post.Title, "-"))
+	if s.RemoveUnprintableChars {
+		title = strings.Map(func(r rune) rune {
+			if unicode.IsPrint(r) {
+				return r
+			}
+			return -1
+		}, title)
+	}
+
+	planDir := ""
+	if s.DirByPlan {
+		planDir = fmt.Sprintf("%dyen", post.FeeRequired)
+	}
+
+	if s.DirByPost {
+		// [SaveDirectory]/[CreatorID]/[PlanDir]/[yyyy]-[MM]-[dd]-[HHmmss] (postId) title.html
+		return filepath.Join(
+			s.SaveDir,
+			post.CreatorID,
+			planDir,
+			fmt.Sprintf("[%s] (%s) %s.html",
+				date.UTC().Format("2006-01-02-150405"),
+				post.ID,
+				s.limitOsSafely(title)),
+		)
+	}
+
+	// DirByPost=false: [SaveDirectory]/[CreatorID]/[PlanDir]/[yyyy]-[MM]-[dd]-[HHmmss] (postId) title.html
+	return filepath.Join(
+		s.SaveDir,
+		post.CreatorID,
+		planDir,
+		fmt.Sprintf("[%s] (%s) %s.html",
+			date.UTC().Format("2006-01-02-150405"),
+			post.ID,
+			s.limitOsSafely(title)),
+	)
+}
+
+// SaveHTML saves the HTML content of a post
+func (s *LocalStorage) SaveHTML(post Post, htmlContent string) error {
+	if !s.EnableSaveHTML {
+		return nil
+	}
+
+	name := s.makeHTMLFileName(post)
+	if name == "" {
+		return nil
+	}
+
+	dir := filepath.Dir(name)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, 0775)
+		if err != nil {
+			return fmt.Errorf("create directory (%s): %w", dir, err)
+		}
+	}
+
+	return os.WriteFile(name, []byte(htmlContent), 0664)
 }

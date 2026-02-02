@@ -11,17 +11,50 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"reflect"
+	"sync"
 
 	"github.com/hashicorp/go-retryablehttp"
+	"golang.org/x/time/rate"
 )
 
 type OfficialAPIClient struct {
 	HTTPClient *retryablehttp.Client
 	Cookie     string
 	UserAgent  string
+	rateLimiter *rate.Limiter
+	rateLimiterMu sync.RWMutex
+	onJSONReceived JSONReceivedCallback
+}
+
+// JSONReceivedCallback is called when JSON is received from the API
+type JSONReceivedCallback func(url string, jsonData []byte)
+
+// SetRateLimit sets the rate limit for API requests
+func (c *OfficialAPIClient) SetRateLimit(requestsPerSecond float64) {
+	c.rateLimiterMu.Lock()
+	defer c.rateLimiterMu.Unlock()
+	c.rateLimiter = rate.NewLimiter(rate.Limit(requestsPerSecond), 1)
+}
+
+// SetJSONCallback sets the callback function to be called when JSON is received
+func (c *OfficialAPIClient) SetJSONSetCallback(callback JSONReceivedCallback) {
+	c.rateLimiterMu.Lock()
+	defer c.rateLimiterMu.Unlock()
+	c.onJSONReceived = callback
 }
 
 func (c *OfficialAPIClient) Request(ctx context.Context, method string, url string) (*http.Response, error) {
+	// Wait for rate limiter if configured
+	c.rateLimiterMu.RLock()
+	limiter := c.rateLimiter
+	c.rateLimiterMu.RUnlock()
+	
+	if limiter != nil {
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+	}
+
 	req, err := retryablehttp.NewRequest(method, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http request building error: %w", err)
@@ -57,7 +90,22 @@ func (c *OfficialAPIClient) RequestAndUnwrapJSON(ctx context.Context, method str
 		return fmt.Errorf("status is %s", resp.Status)
 	}
 
-	if err = json.NewDecoder(resp.Body).Decode(v); err != nil {
+	// Read the entire response body first
+	jsonData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response body: %w", err)
+	}
+
+	// Call the JSON callback if configured
+	c.rateLimiterMu.RLock()
+	callback := c.onJSONReceived
+	c.rateLimiterMu.RUnlock()
+	if callback != nil {
+		callback(url, jsonData)
+	}
+
+	// Decode JSON
+	if err = json.Unmarshal(jsonData, v); err != nil {
 		if dump, dumpErr := httputil.DumpResponse(resp, false); dumpErr == nil {
 			slog.Debug("Response dump", "dump", string(dump))
 		}
