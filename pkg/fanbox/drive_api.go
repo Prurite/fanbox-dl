@@ -88,7 +88,7 @@ func (d *DriveAPIDownloader) DownloadFile(ctx context.Context, fileID string, sa
 
 	// Check if file is a Google Docs file (needs export)
 	if isGoogleDocsFile(file.MimeType) {
-		return fmt.Errorf("Google Docs files (Docs/Sheets/Slides) are not supported for direct download")
+		return fmt.Errorf("google docs files (docs/sheets/slides) are not supported for direct download")
 	}
 
 	// Prepare save path
@@ -124,7 +124,11 @@ func (d *DriveAPIDownloader) DownloadFile(ctx context.Context, fileID string, sa
 	if err != nil {
 		return fmt.Errorf("download file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.DebugContext(ctx, "close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

@@ -445,11 +445,7 @@ func (c *Checker) downloadWithRetry(ctx context.Context, post Post, order int, d
 
 		// Check error string for timeout errors
 		errStr := err.Error()
-		if containsTimeoutError(errStr) {
-			return true
-		}
-
-		return false
+		return containsTimeoutError(errStr)
 	}
 
 	var lastErr error

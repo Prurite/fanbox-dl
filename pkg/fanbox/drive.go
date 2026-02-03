@@ -291,7 +291,9 @@ func (g *DriveDownloader) downloadOnce(ctx context.Context, urlStr string, cooki
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		// Read body to check for virus scan warning
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			slog.DebugContext(ctx, "close response body", "error", err)
+		}
 		return "", nil, nil, "", "", false, 0, false, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -309,14 +311,18 @@ func (g *DriveDownloader) downloadOnce(ctx context.Context, urlStr string, cooki
 	peek := make([]byte, 512)
 	n, readErr := resp.Body.Read(peek)
 	if readErr != nil && readErr != io.EOF {
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			slog.DebugContext(ctx, "close response body", "error", err)
+		}
 		return "", nil, nil, "", "", false, 0, false, fmt.Errorf("read response: %w", readErr)
 	}
 	peek = peek[:n]
 
 	if g.looksLikeHTML(contentType, peek) {
 		bodyBytes, err := io.ReadAll(io.MultiReader(bytes.NewReader(peek), resp.Body))
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.DebugContext(ctx, "close response body", "error", closeErr)
+		}
 		if err != nil {
 			return "", nil, nil, "", "", false, 0, false, fmt.Errorf("read HTML response: %w", err)
 		}
@@ -325,7 +331,9 @@ func (g *DriveDownloader) downloadOnce(ctx context.Context, urlStr string, cooki
 		// Debug: Save HTML to temp file for inspection
 		if tmpFile, err := os.CreateTemp("", "gdrive-response-*.html"); err == nil {
 			_, _ = tmpFile.WriteString(htmlContent)
-			tmpFile.Close()
+			if closeErr := tmpFile.Close(); closeErr != nil {
+				slog.Debug("close temp file", "error", closeErr, "file", tmpFile.Name())
+			}
 			slog.Debug("Saved Google Drive HTML response", "file", tmpFile.Name())
 		}
 
@@ -367,7 +375,7 @@ func (g *DriveDownloader) extractConfirmToken(htmlContent string, cookies []*htt
 	}
 
 	// Try input field pattern: name="confirm" value="xxx"
-	pattern = `(?i)name=["']confirm["']\s*+value=["']([a-zA-Z0-9_-]+)["']`
+	pattern = `(?i)name=["']confirm["']\s*value=["']([a-zA-Z0-9_-]+)["']`
 	re = regexp.MustCompile(pattern)
 	matches = re.FindStringSubmatch(htmlContent)
 	if len(matches) > 1 {
@@ -375,7 +383,7 @@ func (g *DriveDownloader) extractConfirmToken(htmlContent string, cookies []*htt
 	}
 
 	// Try alternate input pattern: value="xxx" name="confirm"
-	pattern = `(?i)value=["']([a-zA-Z0-9_-]+)["']\s*+name=["']confirm["']`
+	pattern = `(?i)value=["']([a-zA-Z0-9_-]+)["']\s*name=["']confirm["']`
 	re = regexp.MustCompile(pattern)
 	matches = re.FindStringSubmatch(htmlContent)
 	if len(matches) > 1 {
@@ -391,7 +399,7 @@ func (g *DriveDownloader) extractConfirmToken(htmlContent string, cookies []*htt
 	}
 
 	// Try id="confirm" value="xxx" pattern
-	pattern = `(?i)id=["']confirm["']\s*+value=["']([a-zA-Z0-9_-]+)["']`
+	pattern = `(?i)id=["']confirm["']\s*value=["']([a-zA-Z0-9_-]+)["']`
 	re = regexp.MustCompile(pattern)
 	matches = re.FindStringSubmatch(htmlContent)
 	if len(matches) > 1 {

@@ -89,7 +89,22 @@ func (rd *RobustDownloader) DownloadWithResume(ctx context.Context, url string, 
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
-	defer file.Close()
+	closeFile := func() error {
+		if file == nil {
+			return nil
+		}
+		if err := file.Close(); err != nil {
+			file = nil
+			return err
+		}
+		file = nil
+		return nil
+	}
+	defer func() {
+		if err := closeFile(); err != nil {
+			slog.WarnContext(ctx, "close temp file", "error", err, "path", tempPath)
+		}
+	}()
 
 	// Download with chunked resume
 	currentOffset := rangeStart
@@ -187,7 +202,7 @@ func (rd *RobustDownloader) DownloadWithResume(ctx context.Context, url string, 
 		return fmt.Errorf("sync file: %w", err)
 	}
 
-	if err := file.Close(); err != nil {
+	if err := closeFile(); err != nil {
 		state.Status = downloadStateStatusFailed
 		state.LastError = err.Error()
 		state.Bytes = currentOffset
@@ -240,10 +255,12 @@ func (rd *RobustDownloader) getFileSize(ctx context.Context, url string) (int64,
 		if err != nil {
 			return 0, false, err
 		}
-		defer resp.Body.Close()
-	} else {
-		defer resp.Body.Close()
 	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.WarnContext(ctx, "close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		return 0, false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)

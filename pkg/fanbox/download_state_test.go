@@ -1,6 +1,7 @@
 package fanbox
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,7 +383,7 @@ func TestSaveReaderWithState(t *testing.T) {
 	testContent := strings.Repeat("Hello, World!\n", 100)
 	reader := strings.NewReader(testContent)
 
-	err := saveReaderWithState(nil, savePath, reader, meta, int64(len(testContent)), 0644)
+	err := saveReaderWithState(context.TODO(), savePath, reader, meta, int64(len(testContent)), 0644)
 	if err != nil {
 		t.Fatalf("saveReaderWithState() error: %v", err)
 	}
