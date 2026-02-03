@@ -5,6 +5,7 @@
 This project has been enhanced with features from [PixivFanboxDownloader](https://github.com/konnokai/PixivFanboxDownloader), including:
 - HTML page generation
 - Gigafile auto-download
+- Google Drive auto-download
 - State management for tracking downloads
 
 Caution: `fanbox-dl` is command-line-program, so it doesn't provide graphical user interface.
@@ -54,7 +55,11 @@ The latest binary can be downloaded [here](https://github.com/hareku/fanbox-dl/r
 | save-html | Generate HTML pages for downloaded posts. | `--save-html` | `false` |
 | html-language | Language for HTML generation (zh-CN, zh-TW, ja, en). | `--html-language ja` | `zh-CN` |
 | download-gigafiles | Automatically download files from gigafile.nu links in post content. | `--download-gigafiles` | `false` |
+| download-drive | Automatically download files from Google Drive links in post content. | `--download-drive` | `false` |
+| download-threads | Number of concurrent download workers for assets and external links. | `--download-threads 4` | `1` |
+| timeout | HTTP timeout for downloads and API requests (e.g., 30s, 5m). | `--timeout 60s` | `0` (no timeout) |
 | use-state-manager | Use state manager to track downloaded posts (creates LastSavePostId.json). | `--use-state-manager` | `false` |
+| check | Check downloaded content for completeness without downloading. Validates that all images, files, text, JSON, and HTML files exist. | `--check` | `false` |
 
 ### Example
 
@@ -97,6 +102,52 @@ This feature:
 - Automatically downloads files to the same directory
 - Handles cookies and filenames from the gigafile server
 
+#### Google Drive Auto-Download
+
+Automatically detect and download files from Google Drive links found in post content:
+
+```bash
+fanbox-dl --cookie "YOUR_COOKIE" --save-html --download-drive
+```
+
+This feature:
+- Scans HTML content for Google Drive URLs (e.g., `https://drive.google.com/file/d/FILE_ID/view?usp=sharing`)
+- Automatically downloads files to the same directory
+- Handles large files and virus scan warning pages
+- Extracts filenames from Content-Disposition headers
+- Supports resume from interrupted downloads via `.part` files
+- Compatible with [gdown](https://github.com/wkentaro/gdown) download strategies
+
+**Optional: Using Google Drive API for faster downloads**
+
+For better performance and reliability, you can configure a Google Drive API key:
+
+```bash
+# Get a free API key from https://console.cloud.google.com/apis/credentials
+# 1. Create a new project or select existing one
+# 2. Enable Google Drive API
+# 3. Create credentials > API key
+# 4. Set the API key as environment variable
+
+export GOOGLE_DRIVE_API_KEY="your-api-key-here"
+
+# Run fanbox-dl
+fanbox-dl --cookie "YOUR_COOKIE" --download-drive
+```
+
+When API key is configured, the downloader will:
+- First attempt to download via Google Drive API v3 (faster, no confirmation page)
+- Fall back to direct download if API fails
+- Better handle large files and resume support
+
+**Note**: Without API key, the downloader still works using direct download with confirmation page handling.
+
+You can combine both Gigafile and Google Drive auto-download:
+
+```bash
+fanbox-dl --cookie "YOUR_COOKIE" --save-html --download-gigafiles --download-drive
+```
+
 #### State Manager
 
 Track downloaded posts to avoid re-downloading:
@@ -107,8 +158,101 @@ fanbox-dl --cookie "YOUR_COOKIE" --use-state-manager
 
 This creates and uses:
 - `LastSavePostId.json`: Stores the last downloaded post ID for each creator
+- `.state` files: Track individual download progress for resume capability
 - Automatically stops when reaching already downloaded posts
 - Updates the last post ID after each successful download
+
+#### Checking Download Completeness
+
+Verify that all content has been downloaded successfully without re-downloading:
+
+```bash
+fanbox-dl --cookie "YOUR_COOKIE" --check
+```
+
+The check mode will:
+- Scan all posts from your creators
+- Verify that all expected files exist:
+  - Images and files from posts
+  - Text content (if `--skip-texts` was not used)
+  - JSON files (if `--save-json` was enabled)
+  - HTML files (if `--save-html` was enabled)
+- Report any missing files with detailed information
+- Display a summary of complete vs incomplete posts
+
+**Example output:**
+```
+INFO Checking creator creator_id=someuser
+INFO Incomplete post post_id=12345 title="Post Title"
+INFO   Missing image file=0-image.jpg
+INFO   Missing: JSON
+WARN Check summary total=50 complete=48 incomplete=2
+```
+
+**Check specific creators:**
+```bash
+fanbox-dl --cookie "YOUR_COOKIE" --check --creator user1,user2
+```
+
+**Check with same options used during download:**
+```bash
+# If you downloaded with these options:
+fanbox-dl --cookie "YOUR_COOKIE" --save-json --save-html --dir-by-post
+
+# Check with the same options:
+fanbox-dl --cookie "YOUR_COOKIE" --check --save-json --save-html --dir-by-post
+```
+
+**Note**: The `--check` flag respects all path-related options (`--save-dir`, `--dir-by-post`, `--dir-by-plan`) and content options (`--skip-files`, `--skip-images`, `--skip-texts`, `--save-json`, `--save-html`) to ensure it checks the correct locations and expected files.
+
+**State File Management**
+
+The state manager creates two types of files:
+
+1. **LastSavePostId.json** - Tracks the last successfully downloaded post for each creator:
+```json
+{
+  "creator1": 12345678,
+  "creator2": 87654321
+}
+```
+
+2. **Download State Files** (`.state`) - Track individual file downloads for resume:
+```json
+{
+  "version": 1,
+  "status": "downloading",
+  "creatorId": "creator1",
+  "postId": "12345678",
+  "postTitle": "Post Title",
+  "assetId": "asset123",
+  "assetType": "image",
+  "url": "https://...",
+  "filePath": "/path/to/file.jpg",
+  "bytes": 1048576,
+  "totalBytes": 2097152,
+  "updatedAt": "2024-01-01T12:00:00Z"
+}
+```
+
+**Resume Interrupted Downloads**
+
+If a download is interrupted, the state manager will automatically resume from where it left off:
+- Partial files are saved with `.part` extension
+- State files track download progress
+- On restart, downloads resume using HTTP Range requests
+
+**Cleaning Up State Files**
+
+State files are automatically cleaned up when downloads complete successfully. If you need to manually clean up orphaned state files:
+
+```bash
+# Find and remove completed state files
+find ./images -name "*.state" -type f -delete
+
+# Remove partial download files
+find ./images -name "*.part" -type f -delete
+```
 
 #### Rate Limiting
 
@@ -141,18 +285,50 @@ fanbox-dl \
   --dir-by-post \
   --save-html \
   --download-gigafiles \
+  --download-drive \
   --use-state-manager \
   --rate-limit 2.0 \
   --save-json \
-  --verbose
+  --verbose \
+  #--check
 ```
 
 This provides a complete experience:
 - Download posts with HTML generation and working hyperlinks
 - Auto-download gigafile links
+- Auto-download Google Drive links
 - Track progress with state manager
 - Avoid duplicate downloads
 
-## Contribution
+#### Checking Downloads After Completion
 
-Please open an issue or pull request.
+After downloading, verify that all content is complete:
+
+```bash
+# Check all downloaded content
+fanbox-dl --cookie "YOUR_COOKIE" --check
+
+# Check specific directory with same options
+fanbox-dl --cookie "YOUR_COOKIE" --check --save-dir "./downloads" --dir-by-post --save-html --save-json
+```
+
+This is useful for:
+- Verifying after interrupted downloads
+- Checking if any files are missing
+- Auditing download completeness
+
+v ./pkg/fanbox -run TestDriveDownloader
+```
+
+### Building from Source
+
+```bash
+# Build for current platform
+go build -o fanbox-dl ./cmd/fanbox-dl
+
+# Build for specific platform
+GOOS=windows GOARCH=amd64 go build -o fanbox-dl.exe ./cmd/fanbox-dl
+GOOS=darwin GOARCH=arm64 go build -o fanbox-dl-mac ./cmd/fanbox-dl
+GOOS=linux GOARCH=amd64 go build -o fanbox-dl-linux ./cmd/fanbox-dl
+```
+

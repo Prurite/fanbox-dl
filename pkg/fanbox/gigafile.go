@@ -3,7 +3,6 @@ package fanbox
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -29,8 +28,9 @@ func NewGigafileDownloader(httpClient *http.Client, userAgent string) *GigafileD
 
 // ExtractGigafileURLs extracts all gigafile URLs from a string
 func ExtractGigafileURLs(content string) []string {
-	// Pattern: https://\d{1,2}\.gigafile\.nu/\d{4}-[a-f0-9]{32}
-	pattern := `https://\d{1,2}\.gigafile\.nu/\d{4}-[a-f0-9]{32}`
+	// Pattern: https://\d{1,2}\.gigafile\.nu/\d{4}-[a-f0-9]{40}
+	// Note: The hash is 40 characters (4 digits + 32 hex chars + 4 more hex chars)
+	pattern := `https://\d{1,2}\.gigafile\.nu/\d{4}-[a-f0-9]+`
 	re := regexp.MustCompile(pattern)
 
 	matches := re.FindAllString(content, -1)
@@ -49,7 +49,7 @@ func ExtractGigafileURLs(content string) []string {
 }
 
 // DownloadFile downloads a file from a gigafile URL
-func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL string, saveDir string) error {
+func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL string, saveDir string, meta DownloadStateMeta) error {
 	// Convert to download URL
 	// Original: https://12.gigafile.nu/1234-abcdef...
 	// Download: https://12.gigafile.nu/download.php?file=1234-abcdef...
@@ -57,8 +57,15 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 	downloadURL := strings.Replace(gigafileURL, "nu/", "nu/download.php?file=", 1)
 
 	// Validate the URL
-	if _, err := url.Parse(downloadURL); err != nil {
+	parsedURL, err := url.Parse(downloadURL)
+	if err != nil {
 		return fmt.Errorf("parse URL: %w", err)
+	}
+	if meta.AssetType == "" {
+		meta.AssetType = "gigafile"
+	}
+	if meta.AssetID == "" {
+		meta.AssetID = strings.TrimPrefix(parsedURL.Query().Get("file"), "/")
 	}
 
 	// First, get the gfsid cookie from the original URL
@@ -78,6 +85,24 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 		return fmt.Errorf("file expired: %s", gigafileURL)
 	}
 
+	savePath := filepath.Join(saveDir, filename)
+	complete, err := isDownloadComplete(savePath)
+	if err != nil {
+		return fmt.Errorf("check file: %w", err)
+	}
+	if complete {
+		slog.Info("Gigafile already downloaded", "filename", filename, "url", gigafileURL)
+		return nil
+	}
+
+	rangeStart, hasTemp, err := tempFileOffset(savePath)
+	if err != nil {
+		return fmt.Errorf("check temp file: %w", err)
+	}
+	if rangeStart <= 0 {
+		hasTemp = false
+	}
+
 	// Download the file
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
@@ -87,6 +112,9 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 	req.Header.Set("User-Agent", g.userAgent)
 	req.Header.Set("Referer", "https://www.fanbox.cc/")
 	req.Header.Set("Cookie", fmt.Sprintf("gfsid=%s", cookie))
+	if hasTemp && rangeStart > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", rangeStart))
+	}
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
@@ -96,22 +124,29 @@ func (g *GigafileDownloader) DownloadFile(ctx context.Context, gigafileURL strin
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusPartialContent {
+		if !hasTemp || rangeStart <= 0 {
+			return fmt.Errorf("unexpected partial content response")
+		}
+	} else if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
 	// Save the file
-	savePath := saveDir + "/" + filename
-	outFile, err := createFile(savePath)
-	if err != nil {
-		return fmt.Errorf("create file: %w", err)
+	meta.URL = gigafileURL
+	if resp.StatusCode == http.StatusOK && hasTemp && rangeStart > 0 {
+		if err := os.Remove(tempFilePath(savePath)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove temp file: %w", err)
+		}
+		hasTemp = false
+		rangeStart = 0
 	}
-	defer func() {
-		_ = outFile.Close()
-	}()
 
-	_, err = io.Copy(outFile, resp.Body)
-	if err != nil {
+	if hasTemp && rangeStart > 0 {
+		if err := saveReaderWithStateAt(ctx, savePath, resp.Body, meta, resp.ContentLength, 0666, rangeStart, true); err != nil {
+			return fmt.Errorf("save file: %w", err)
+		}
+	} else if err := saveReaderWithState(ctx, savePath, resp.Body, meta, resp.ContentLength, 0666); err != nil {
 		return fmt.Errorf("save file: %w", err)
 	}
 
@@ -202,14 +237,4 @@ func (g *GigafileDownloader) getFilenameFromServer(ctx context.Context, urlStr s
 	}
 
 	return "", fmt.Errorf("filename not found in Content-Disposition")
-}
-
-// createFile is a helper to create a file (can be mocked for testing)
-var createFile = func(path string) (*os.File, error) {
-	// Ensure directory exists
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
-	}
-	return os.Create(path)
 }

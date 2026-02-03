@@ -1,11 +1,13 @@
 package fanbox
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,40 +29,36 @@ type LocalStorage struct {
 func (s *LocalStorage) Save(post Post, order int, d Downloadable, r io.Reader) error {
 	name := s.makeFileName(post, order, d)
 
-	dir := filepath.Dir(name)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err = os.MkdirAll(dir, 0775)
-		if err != nil {
-			return fmt.Errorf("create a directory (%s): %w", dir, err)
-		}
+	assetType := "unknown"
+	switch d.(type) {
+	case Image:
+		assetType = "image"
+	case File:
+		assetType = "file"
 	}
 
-	file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0775)
-	if err != nil {
-		return fmt.Errorf("open a file: %w", err)
+	meta := DownloadStateMeta{
+		CreatorID: post.CreatorID,
+		PostID:    post.ID,
+		PostTitle: post.Title,
+		AssetID:   d.GetID(),
+		AssetType: assetType,
+		URL:       d.GetURL(),
 	}
-	defer func() {
-		_ = file.Close()
-	}()
 
-	_, err = io.Copy(file, r)
-	if err != nil {
-		// Remove the crashed file
-		fileName := file.Name()
-		_ = file.Close()
-
-		if removeRrr := os.Remove(fileName); removeRrr != nil {
-			return fmt.Errorf("file copying error and couldn't remove a crashed file (%s): %w", file.Name(), removeRrr)
-		}
-
-		return fmt.Errorf("file copying error: %w", err)
+	if err := saveReaderWithState(context.Background(), name, r, meta, 0, 0775); err != nil {
+		return fmt.Errorf("save file with state: %w", err)
 	}
 
 	return nil
 }
 
 func (s *LocalStorage) Exist(post Post, order int, d Downloadable) (bool, error) {
-	_, err := os.Stat(s.makeFileName(post, order, d))
+	name := s.makeFileName(post, order, d)
+	if hasIncompleteState(name) {
+		return false, nil
+	}
+	_, err := os.Stat(name)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -217,6 +215,43 @@ func (s *LocalStorage) makeFileName(post Post, order int, d Downloadable) string
 	)
 }
 
+func (s *LocalStorage) makePostDir(post Post) string {
+	date, err := time.Parse(time.RFC3339, post.PublishedDateTime)
+	if err != nil {
+		panic(fmt.Errorf("parse post published date time %s: %w", post.PublishedDateTime, err))
+	}
+
+	title := strings.TrimSpace(filename.EscapeString(post.Title, "-"))
+	if s.RemoveUnprintableChars {
+		title = strings.Map(func(r rune) rune {
+			if unicode.IsPrint(r) {
+				return r
+			}
+			return -1
+		}, title)
+	}
+
+	planDir := ""
+	if s.DirByPlan {
+		planDir = fmt.Sprintf("%dyen", post.FeeRequired)
+	}
+
+	if s.DirByPost {
+		return filepath.Join(
+			s.SaveDir,
+			post.CreatorID,
+			planDir,
+			s.limitOsSafely(fmt.Sprintf("%s-%s", date.UTC().Format("2006-01-02"), title)),
+		)
+	}
+
+	return filepath.Join(
+		s.SaveDir,
+		post.CreatorID,
+		planDir,
+	)
+}
+
 // makeTextFileName generates the filename for the text content
 func (s *LocalStorage) makeTextFileName(post Post) string {
 	date, err := time.Parse(time.RFC3339, post.PublishedDateTime)
@@ -257,6 +292,45 @@ func (s *LocalStorage) makeTextFileName(post Post) string {
 		planDir,
 		s.limitOsSafely(fmt.Sprintf("%s-%s-post.txt", date.UTC().Format("2006-01-02"), title)),
 	)
+}
+
+// FindIncompletePostIDs scans .state files to find posts with incomplete downloads.
+func (s *LocalStorage) FindIncompletePostIDs(creatorID string) (map[int64]struct{}, bool, error) {
+	result := make(map[int64]struct{})
+	root := filepath.Join(s.SaveDir, creatorID)
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return result, false, nil
+	}
+
+	hasUnknown := false
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".state") {
+			return nil
+		}
+		state, err := loadStateFile(path)
+		if err != nil {
+			hasUnknown = true
+			return nil
+		}
+		if state.PostID == "" {
+			hasUnknown = true
+			return nil
+		}
+		postID, err := strconv.ParseInt(state.PostID, 10, 64)
+		if err != nil {
+			hasUnknown = true
+			return nil
+		}
+		result[postID] = struct{}{}
+		return nil
+	}); err != nil {
+		return result, hasUnknown, err
+	}
+
+	return result, hasUnknown, nil
 }
 
 // makeJSONFileName generates the filename for the JSON response
@@ -342,6 +416,11 @@ func (s *LocalStorage) HTMLExists(post Post) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// MakeFileName generates the filename for a downloadable asset
+func (s *LocalStorage) MakeFileName(post Post, order int, d Downloadable) string {
+	return s.makeFileName(post, order, d)
 }
 
 // makeHTMLFileName generates the filename for the HTML file

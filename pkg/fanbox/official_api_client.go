@@ -71,6 +71,37 @@ func (c *OfficialAPIClient) Request(ctx context.Context, method string, url stri
 	return c.HTTPClient.Do(req)
 }
 
+func (c *OfficialAPIClient) RequestWithHeaders(ctx context.Context, method string, url string, headers map[string]string) (*http.Response, error) {
+	// Wait for rate limiter if configured
+	c.rateLimiterMu.RLock()
+	limiter := c.rateLimiter
+	c.rateLimiterMu.RUnlock()
+
+	if limiter != nil {
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+	}
+
+	req, err := retryablehttp.NewRequest(method, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("http request building error: %w", err)
+	}
+
+	req = req.WithContext(ctx)
+	req.Header.Set("Cookie", c.Cookie)
+	req.Header.Set("Origin", "https://www.fanbox.cc")
+	req.Header.Set("Referer", "https://www.fanbox.cc/")
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Encoding", "gzip")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	return c.HTTPClient.Do(req)
+}
+
 func (c *OfficialAPIClient) RequestAndUnwrapJSON(ctx context.Context, method string, url string, v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
