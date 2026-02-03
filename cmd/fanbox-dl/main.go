@@ -112,9 +112,9 @@ var skipImages = &cli.BoolFlag{
 	Usage: "Whether to skip downloading images.",
 }
 var skipTexts = &cli.BoolFlag{
-    Name:  "skip-texts",
-    Value: false,
-    Usage: "Whether to skip downloading post contents as text files.",
+	Name:  "skip-texts",
+	Value: false,
+	Usage: "Whether to skip downloading post contents as text files.",
 }
 var dryRunFlag = &cli.BoolFlag{
 	Name:  "dry-run",
@@ -137,6 +137,60 @@ var removeUnprintableCharsFlag = &cli.BoolFlag{
 	Usage: "Whether to remove unprintable characters from file names.",
 }
 
+var rateLimitFlag = &cli.Float64Flag{
+	Name:  "rate-limit",
+	Value: 0,
+	Usage: "Rate limit in requests per second (0 = no limit).",
+}
+
+var saveJSONFlag = &cli.BoolFlag{
+	Name:  "save-json",
+	Value: false,
+	Usage: "Whether to save original API JSON responses.",
+}
+
+var saveHTMLFlag = &cli.BoolFlag{
+	Name:  "save-html",
+	Value: false,
+	Usage: "Whether to generate HTML pages for posts.",
+}
+
+var htmlLanguageFlag = &cli.StringFlag{
+	Name:  "html-language",
+	Value: "zh-CN",
+	Usage: "Language for HTML generation (zh-CN, zh-TW, ja, en). Default: zh-CN",
+}
+
+var downloadGigafilesFlag = &cli.BoolFlag{
+	Name:  "download-gigafiles",
+	Value: false,
+	Usage: "Whether to automatically download files from gigafile.nu links.",
+}
+
+var downloadDriveFlag = &cli.BoolFlag{
+	Name:  "download-drive",
+	Value: false,
+	Usage: "Whether to automatically download files from Google Drive links.",
+}
+
+var downloadThreadsFlag = &cli.IntFlag{
+	Name:  "download-threads",
+	Value: 1,
+	Usage: "Number of concurrent download workers (assets and external links).",
+}
+
+var timeoutFlag = &cli.DurationFlag{
+	Name:  "timeout",
+	Usage: "HTTP timeout for downloads and API requests (e.g. 30s, 5m). Default: no timeout.",
+	Value: 0,
+}
+
+var useStateManagerFlag = &cli.BoolFlag{
+	Name:  "use-state-manager",
+	Value: false,
+	Usage: "Whether to use state manager to track downloaded posts (creates LastSavePostId.json).",
+}
+
 var startDateFlag = &cli.StringFlag{
 	Name:  "start-date",
 	Usage: "Only download posts published after this date (format: YYYY-MM-DD).",
@@ -147,6 +201,12 @@ var endDateFlag = &cli.StringFlag{
 	Name:  "end-date",
 	Usage: "Only download posts published before this date (format: YYYY-MM-DD).",
 	Value: "",
+}
+
+var checkFlag = &cli.BoolFlag{
+	Name:  "check",
+	Value: false,
+	Usage: "Check downloaded content for completeness and automatically download missing files.",
 }
 
 var app = &cli.App{
@@ -172,14 +232,29 @@ var app = &cli.App{
 		verboseFlag,
 		skipOnErrorFlag,
 		removeUnprintableCharsFlag,
+		rateLimitFlag,
+		saveJSONFlag,
+		saveHTMLFlag,
+		htmlLanguageFlag,
+		downloadGigafilesFlag,
+		downloadDriveFlag,
+		downloadThreadsFlag,
+		timeoutFlag,
+		useStateManagerFlag,
 		startDateFlag,
 		endDateFlag,
+		checkFlag,
 	},
 	Action: func(c *cli.Context) error {
 		applog.InitLogger(c.Bool(verboseFlag.Name))
 		slog.Info("Launching Pixiv FANBOX Downloader!", "version", version, "commit", commit, "date", date)
 		if c.Bool(versionFlag.Name) {
 			return nil
+		}
+
+		// Handle check mode
+		if c.Bool(checkFlag.Name) {
+			return runCheckMode(c)
 		}
 
 		var cookieStr string
@@ -217,7 +292,22 @@ var app = &cli.App{
 
 		httpClient := retryablehttp.NewClient()
 		httpClient.Logger = slog.Default()
+		// Set reasonable retry limits to prevent hanging
+		httpClient.RetryMax = 5
+		httpClient.RetryWaitMin = 1 * time.Second
+		httpClient.RetryWaitMax = 30 * time.Second
+		if timeout := c.Duration(timeoutFlag.Name); timeout > 0 {
+			httpClient.HTTPClient.Timeout = timeout
+			slog.Info("HTTP timeout enabled", "timeout", timeout.String())
+		} else {
+			// Set default timeout if none specified (prevents hanging on slow/stalled connections)
+			httpClient.HTTPClient.Timeout = 2 * time.Minute
+		}
 		httpClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+			// Check if context is cancelled
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
 			if err != nil {
 				return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 			}
@@ -234,29 +324,79 @@ var app = &cli.App{
 		}
 		httpClient.HTTPClient.Transport = tlsTransp
 
+		storage := &fanbox.LocalStorage{
+			SaveDir:                c.String(saveDirFlag.Name),
+			DirByPost:              c.Bool(dirByPostFlag.Name),
+			DirByPlan:              c.Bool(dirByPlanFlag.Name),
+			RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
+			EnableSaveJSON:         c.Bool(saveJSONFlag.Name),
+			EnableSaveHTML:         c.Bool(saveHTMLFlag.Name),
+		}
+
 		api := &fanbox.OfficialAPIClient{
 			HTTPClient: httpClient,
 			Cookie:     cookieStr,
 			UserAgent:  c.String(userAgentFlag.Name),
 		}
 
-		client := &fanbox.Client{
-			CheckAllPosts:     c.Bool(allFlag.Name),
-			DryRun:            c.Bool(dryRunFlag.Name),
-			SkipFiles:         c.Bool(skipFiles.Name),
-			SkipImages:        c.Bool(skipImages.Name),
-			SkipTexts:         c.Bool(skipTexts.Name),
-			SkipOnError:       c.Bool(skipOnErrorFlag.Name),
-			OfficialAPIClient: api,
-			StartDate:         startDate,
-			EndDate:           endDate,
-			Storage: &fanbox.LocalStorage{
-				SaveDir:   c.String(saveDirFlag.Name),
-				DirByPost: c.Bool(dirByPostFlag.Name),
-				DirByPlan: c.Bool(dirByPlanFlag.Name),
+		// Set rate limit if specified
+		if rps := c.Float64(rateLimitFlag.Name); rps > 0 {
+			api.SetRateLimit(rps)
+			slog.Info("Rate limit enabled", "requests_per_second", rps)
+		}
 
+		// Initialize new features
+		var htmlGenerator *fanbox.HTMLGenerator
+		if c.Bool(saveHTMLFlag.Name) {
+			htmlGenerator = &fanbox.HTMLGenerator{
+				Enable:                 true,
+				DirByPost:              c.Bool(dirByPostFlag.Name),
+				DirByPlan:              c.Bool(dirByPlanFlag.Name),
 				RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
-			},
+				SaveDir:                c.String(saveDirFlag.Name),
+				Language:               fanbox.Language(c.String(htmlLanguageFlag.Name)),
+			}
+			slog.Info("HTML generation enabled", "language", c.String(htmlLanguageFlag.Name))
+		}
+
+		var gigafileDownloader *fanbox.GigafileDownloader
+		if c.Bool(downloadGigafilesFlag.Name) {
+			gigafileDownloader = fanbox.NewGigafileDownloader(httpClient.HTTPClient, c.String(userAgentFlag.Name))
+			slog.Info("Gigafile auto-download enabled")
+		}
+
+		var driveDownloader *fanbox.DriveDownloader
+		if c.Bool(downloadDriveFlag.Name) {
+			driveDownloader = fanbox.NewDriveDownloader(httpClient.HTTPClient, c.String(userAgentFlag.Name))
+			slog.Info("Google Drive auto-download enabled")
+		}
+
+		var stateManager *fanbox.StateManager
+		if c.Bool(useStateManagerFlag.Name) {
+			sm, err := fanbox.NewStateManager(".")
+			if err != nil {
+				return fmt.Errorf("create state manager: %w", err)
+			}
+			stateManager = sm
+			slog.Info("State manager enabled")
+		}
+
+		client := &fanbox.Client{
+			CheckAllPosts:      c.Bool(allFlag.Name),
+			DryRun:             c.Bool(dryRunFlag.Name),
+			SkipFiles:          c.Bool(skipFiles.Name),
+			SkipImages:         c.Bool(skipImages.Name),
+			SkipTexts:          c.Bool(skipTexts.Name),
+			SkipOnError:        c.Bool(skipOnErrorFlag.Name),
+			DownloadWorkers:    c.Int(downloadThreadsFlag.Name),
+			OfficialAPIClient:  api,
+			StartDate:          startDate,
+			EndDate:            endDate,
+			Storage:            storage,
+			HTMLGenerator:      htmlGenerator,
+			GigafileDownloader: gigafileDownloader,
+			DriveDownloader:    driveDownloader,
+			StateManager:       stateManager,
 		}
 
 		ctx := c.Context
@@ -291,6 +431,146 @@ var app = &cli.App{
 		slog.InfoContext(ctx, "Completed.", "duration", time.Since(startedAt).Round(time.Millisecond*100))
 		return nil
 	},
+}
+
+func runCheckMode(c *cli.Context) error {
+	// Check mode validates downloaded content and downloads missing files
+	var cookieStr string
+	if sessID := resolveSessionID(c); sessID != "" {
+		cookieStr = fmt.Sprintf("FANBOXSESSID=%s", sessID)
+	}
+	if v := c.String(cookieFlag.Name); v != "" {
+		cookieStr = v
+	}
+
+	httpClient := retryablehttp.NewClient()
+	httpClient.Logger = slog.Default()
+	// Set reasonable retry limits to prevent hanging
+	httpClient.RetryMax = 5
+	httpClient.RetryWaitMin = 1 * time.Second
+	httpClient.RetryWaitMax = 30 * time.Second
+	if timeout := c.Duration(timeoutFlag.Name); timeout > 0 {
+		httpClient.HTTPClient.Timeout = timeout
+	} else {
+		// Set default timeout if none specified (prevents hanging on slow/stalled connections)
+		httpClient.HTTPClient.Timeout = 2 * time.Minute
+	}
+	httpClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		// Check if context is cancelled
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if err != nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		}
+		b, err := fanbox.IsFailedToThumbnailingErr(resp)
+		if err == nil && b {
+			return false, fanbox.ErrFailedToThumbnailing
+		}
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, nil)
+	}
+
+	tlsTransp, err := tlsclient.NewTransportWithOptions(tls_client.NewNoopLogger(), tls_client.WithClientProfile(profiles.Chrome_131))
+	if err != nil {
+		return fmt.Errorf("create tls transport: %w", err)
+	}
+	httpClient.HTTPClient.Transport = tlsTransp
+
+	storage := &fanbox.LocalStorage{
+		SaveDir:                c.String(saveDirFlag.Name),
+		DirByPost:              c.Bool(dirByPostFlag.Name),
+		DirByPlan:              c.Bool(dirByPlanFlag.Name),
+		RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
+		EnableSaveJSON:         c.Bool(saveJSONFlag.Name),
+		EnableSaveHTML:         c.Bool(saveHTMLFlag.Name),
+	}
+
+	api := &fanbox.OfficialAPIClient{
+		HTTPClient: httpClient,
+		Cookie:     cookieStr,
+		UserAgent:  c.String(userAgentFlag.Name),
+	}
+
+	if rps := c.Float64(rateLimitFlag.Name); rps > 0 {
+		api.SetRateLimit(rps)
+	}
+
+	// Initialize HTML generator if enabled
+	var htmlGenerator *fanbox.HTMLGenerator
+	if c.Bool(saveHTMLFlag.Name) {
+		htmlGenerator = &fanbox.HTMLGenerator{
+			Enable:                 true,
+			DirByPost:              c.Bool(dirByPostFlag.Name),
+			DirByPlan:              c.Bool(dirByPlanFlag.Name),
+			RemoveUnprintableChars: c.Bool(removeUnprintableCharsFlag.Name),
+			SaveDir:                c.String(saveDirFlag.Name),
+			Language:               fanbox.Language(c.String(htmlLanguageFlag.Name)),
+		}
+		slog.Info("HTML generation enabled for check mode", "language", c.String(htmlLanguageFlag.Name))
+	}
+
+	// Initialize gigafile downloader if enabled
+	var gigafileDownloader *fanbox.GigafileDownloader
+	if c.Bool(downloadGigafilesFlag.Name) {
+		gigafileDownloader = fanbox.NewGigafileDownloader(httpClient.HTTPClient, c.String(userAgentFlag.Name))
+		slog.Info("Gigafile auto-download enabled for check mode")
+	}
+
+	// Initialize drive downloader if enabled
+	var driveDownloader *fanbox.DriveDownloader
+	if c.Bool(downloadDriveFlag.Name) {
+		driveDownloader = fanbox.NewDriveDownloader(httpClient.HTTPClient, c.String(userAgentFlag.Name))
+		slog.Info("Google Drive auto-download enabled for check mode")
+	}
+
+	ctx := c.Context
+	startedAt := time.Now()
+
+	idLister := &fanbox.CreatorIDLister{
+		OfficialAPIClient: api,
+	}
+
+	in := &fanbox.CreatorIDListerDoInput{
+		IncludeSupporting: c.Bool(supportingFlag.Name),
+		IncludeFollowing:  c.Bool(followingFlag.Name),
+	}
+	if c.String(creatorFlag.Name) != "" {
+		in.InputCreatorIDs = strings.Split(c.String(creatorFlag.Name), ",")
+	}
+	if c.String(ignoreCreatorFlag.Name) != "" {
+		in.IgnoreCreatorIDs = strings.Split(c.String(ignoreCreatorFlag.Name), ",")
+	}
+
+	ids, err := idLister.Do(ctx, in)
+	if err != nil {
+		return fmt.Errorf("resolve creator IDs: %w", err)
+	}
+
+	checker := &fanbox.Checker{
+		OfficialAPIClient:  api,
+		Storage:            storage,
+		SkipFiles:          c.Bool(skipFiles.Name),
+		SkipImages:         c.Bool(skipImages.Name),
+		SkipTexts:          c.Bool(skipTexts.Name),
+		EnableSaveJSON:     c.Bool(saveJSONFlag.Name),
+		EnableSaveHTML:     c.Bool(saveHTMLFlag.Name),
+		DownloadOnMissing:  true, // Enable automatic download of missing files
+		DownloadWorkers:    c.Int(downloadThreadsFlag.Name),
+		HTMLGenerator:      htmlGenerator,
+		GigafileDownloader: gigafileDownloader,
+		DriveDownloader:    driveDownloader,
+	}
+
+	for _, id := range ids {
+		slog.InfoContext(ctx, "Checking creator", "creator_id", id)
+		if err := checker.Run(ctx, id); err != nil {
+			return fmt.Errorf("failed checking of %q: %w", id, err)
+		}
+	}
+
+	slog.InfoContext(ctx, "Check completed.", "duration", time.Since(startedAt).Round(time.Millisecond*100))
+	slog.InfoContext(ctx, "Note: Missing files are being downloaded asynchronously in the background")
+	return nil
 }
 
 func main() {

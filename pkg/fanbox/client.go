@@ -2,6 +2,7 @@ package fanbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,13 +10,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/hareku/fanbox-dl/internal/ctxval"
 	"golang.org/x/net/http2"
 )
 
-// Client is the struct for Client.
+// Client is struct for Client.
 type Client struct {
 	CheckAllPosts     bool
 	DryRun            bool
@@ -23,10 +26,18 @@ type Client struct {
 	SkipImages        bool
 	SkipTexts         bool
 	SkipOnError       bool
+	DownloadWorkers   int
 	OfficialAPIClient *OfficialAPIClient
 	Storage           *LocalStorage
 	StartDate         *time.Time
 	EndDate           *time.Time
+
+	// New features
+	HTMLGenerator      *HTMLGenerator
+	GigafileDownloader *GigafileDownloader
+	DriveDownloader    *DriveDownloader
+	StateManager       *StateManager
+	CreatorName        string
 }
 
 func (c *Client) Run(ctx context.Context, creatorID string) error {
@@ -52,6 +63,39 @@ func (c *Client) Run(ctx context.Context, creatorID string) error {
 			"end_date", c.formatDateOrNil(c.EndDate))
 	}
 
+	// Check state manager for last post ID
+	var shouldCheckLastPost bool
+	var lastPostID int64
+	var incompletePostIDs map[int64]struct{}
+	forceFullScan := false
+	if c.StateManager != nil {
+		if ids, hasUnknown, err := c.Storage.FindIncompletePostIDs(creatorID); err != nil {
+			slog.WarnContext(ctx, "Failed to scan .state files", "error", err)
+		} else {
+			incompletePostIDs = ids
+			if len(ids) > 0 {
+				slog.InfoContext(ctx, "Found incomplete downloads", "count", len(ids))
+			}
+			if hasUnknown {
+				forceFullScan = true
+				slog.WarnContext(ctx, "Found unreadable .state files, disabling last post optimization")
+			}
+		}
+
+		if !forceFullScan {
+			if id, exists := c.StateManager.GetLastPostID(creatorID); exists {
+				lastPostID = id
+				shouldCheckLastPost = true
+				slog.InfoContext(ctx, "Using last post ID filter", "last_id", lastPostID)
+			}
+		}
+	}
+
+	remainingIncomplete := make(map[int64]struct{})
+	for id := range incompletePostIDs {
+		remainingIncomplete[id] = struct{}{}
+	}
+
 	for i, page := range pagination.Pages {
 		content := ListCreatorResponse{}
 		err := c.OfficialAPIClient.RequestAndUnwrapJSON(ctx, http.MethodGet, page, &content)
@@ -62,6 +106,40 @@ func (c *Client) Run(ctx context.Context, creatorID string) error {
 			"page", i+1,
 			"posts", len(content.Body),
 		)
+
+		// Filter posts based on last post ID, but keep incomplete ones
+		if shouldCheckLastPost {
+			filteredPosts := make([]Post, 0, len(content.Body))
+			reachedLastPost := false
+			for _, post := range content.Body {
+				postID, err := strconv.ParseInt(post.ID, 10, 64)
+				if err != nil {
+					slog.DebugContext(ctx, "Failed to parse post ID", "id", post)
+					continue
+				}
+
+				if postID <= lastPostID {
+					if _, ok := remainingIncomplete[postID]; ok {
+						filteredPosts = append(filteredPosts, post)
+						delete(remainingIncomplete, postID)
+						continue
+					}
+					reachedLastPost = true
+					if len(remainingIncomplete) == 0 {
+						break
+					}
+					continue
+				}
+
+				filteredPosts = append(filteredPosts, post)
+			}
+			content.Body = filteredPosts
+
+			if reachedLastPost && len(remainingIncomplete) == 0 {
+				slog.InfoContext(ctx, "Reached last saved post, stopping")
+				break
+			}
+		}
 
 		if err := c.handlePage(ctx, &content); err != nil {
 			if errors.Is(err, errAlreadyDownloaded) {
@@ -82,6 +160,32 @@ func (c *Client) Run(ctx context.Context, creatorID string) error {
 			}
 		}
 	}
+
+	// Update last post ID if state manager is enabled
+	if c.StateManager != nil && len(pagination.Pages) > 0 {
+		// Get the first post from the first page to update as last downloaded
+		firstPage := pagination.Pages[0]
+		firstPageContent := ListCreatorResponse{}
+		if err := c.OfficialAPIClient.RequestAndUnwrapJSON(ctx, http.MethodGet, firstPage, &firstPageContent); err == nil {
+			if len(firstPageContent.Body) > 0 {
+				// Find the first non-pinned post
+				for _, post := range firstPageContent.Body {
+					if !post.IsPinned {
+						postID, err := strconv.ParseInt(post.ID, 10, 64)
+						if err == nil {
+							if err := c.StateManager.UpdateLastPostID(creatorID, postID); err != nil {
+								slog.Warn("Failed to update last post ID", "error", err)
+							} else {
+								slog.Info("Updated last post ID", "creator_id", creatorID, "post_id", postID)
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -109,7 +213,7 @@ func (c *Client) handlePage(ctx context.Context, content *ListCreatorResponse) e
 func (c *Client) handlePost(ctx context.Context, item Post) error {
 	ctx = ctxval.AddSlogAttrs(ctx, slog.String("title", item.Title), slog.String("published_at", item.PublishedDateTime))
 
-	// Skip if the post is outside the date range
+	// Skip if post is outside of date range
 	if !c.isWithinDateRange(item.PublishedDateTime) {
 		slog.DebugContext(ctx, "Skipping post outside date range")
 		return nil
@@ -134,9 +238,19 @@ func (c *Client) handlePost(ctx context.Context, item Post) error {
 	}
 	post := postResp.Body
 
+	// Handle saving JSON if enabled
+	if err := c.handlePostJSON(ctx, post); err != nil {
+		return fmt.Errorf("handle post json: %w", err)
+	}
+
 	// Handle text content
 	if err := c.handlePostText(ctx, post); err != nil {
 		return fmt.Errorf("handle post text: %w", err)
+	}
+
+	// Handle HTML generation
+	if err := c.handlePostHTML(ctx, post); err != nil {
+		return fmt.Errorf("handle post html: %w", err)
 	}
 
 	// for backward-compatibility, split downloadable file's order into two types
@@ -144,7 +258,9 @@ func (c *Client) handlePost(ctx context.Context, item Post) error {
 		nextImgOrder  int
 		nextFileOrder int
 	)
-	for i, d := range post.ListDownloadable() {
+	downloadables := post.ListDownloadable()
+	tasks := make([]func() error, 0, len(downloadables))
+	for i, d := range downloadables {
 		var (
 			order     int
 			assetType string
@@ -163,15 +279,70 @@ func (c *Client) handlePost(ctx context.Context, item Post) error {
 			return fmt.Errorf("unsupported asset type: %+v", d)
 		}
 
-		if err := c.handleAsset(
-			ctxval.AddSlogAttrs(ctx, slog.Int("i", i), slog.String("asset_type", assetType)),
-			post, order, d,
-		); err != nil {
-			if errors.Is(err, errAlreadyDownloaded) && c.CheckAllPosts {
-				continue
+		i := i
+		d := d
+		orderLocal := order
+		assetTypeLocal := assetType
+		tasks = append(tasks, func() error {
+			if err := c.handleAsset(
+				ctxval.AddSlogAttrs(ctx, slog.Int("i", i), slog.String("asset_type", assetTypeLocal)),
+				post, orderLocal, d,
+			); err != nil {
+				if errors.Is(err, errAlreadyDownloaded) && c.CheckAllPosts {
+					return nil
+				}
+				return fmt.Errorf("handle %s: %w", assetTypeLocal, err)
 			}
-			return fmt.Errorf("handle %s: %w", assetType, err)
+			return nil
+		})
+	}
+	if err := c.runTasks(ctx, tasks); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// handlePostJSON handles saving JSON response of a post.
+func (c *Client) handlePostJSON(ctx context.Context, post Post) error {
+	if !c.Storage.EnableSaveJSON {
+		slog.DebugContext(ctx, "Skip saving JSON")
+		return nil
+	}
+
+	// Check if JSON already exists
+	jsonExists, err := c.Storage.JSONExists(post)
+	if err != nil {
+		if c.SkipOnError {
+			slog.ErrorContext(ctx, "Skip checking JSON existence due to error", "error", err)
+			return nil
 		}
+		return fmt.Errorf("check whether JSON already saved: %w", err)
+	}
+
+	if jsonExists {
+		slog.DebugContext(ctx, "JSON already saved")
+		return nil
+	}
+
+	if c.DryRun {
+		slog.InfoContext(ctx, "Skip saving JSON due to dry-run mode")
+		return nil
+	}
+
+	slog.InfoContext(ctx, "Saving JSON")
+	// Get JSON from post - we need to marshal it
+	jsonData, err := json.Marshal(post)
+	if err != nil {
+		return fmt.Errorf("marshal post to JSON: %w", err)
+	}
+
+	if err := c.Storage.SaveJSON(post, jsonData); err != nil {
+		if c.SkipOnError {
+			slog.ErrorContext(ctx, "Skip saving JSON due to error", "error", err)
+			return nil
+		}
+		return fmt.Errorf("save JSON: %w", err)
 	}
 
 	return nil
@@ -221,7 +392,116 @@ func (c *Client) handlePostText(ctx context.Context, post Post) error {
 	return nil
 }
 
-// isWithinDateRange checks if the post's published date is within the specified date range
+// handlePostHTML handles saving HTML content of a post.
+func (c *Client) handlePostHTML(ctx context.Context, post Post) error {
+	if c.HTMLGenerator == nil || !c.HTMLGenerator.Enable {
+		slog.DebugContext(ctx, "Skip saving HTML")
+		return nil
+	}
+
+	// Check if HTML already exists
+	htmlExists, err := c.Storage.HTMLExists(post)
+	if err != nil {
+		if c.SkipOnError {
+			slog.ErrorContext(ctx, "Skip checking HTML existence due to error", "error", err)
+			return nil
+		}
+		return fmt.Errorf("check whether HTML already saved: %w", err)
+	}
+
+	if htmlExists {
+		slog.DebugContext(ctx, "HTML already saved")
+		return nil
+	}
+
+	if c.DryRun {
+		slog.InfoContext(ctx, "Skip saving HTML due to dry-run mode")
+		return nil
+	}
+
+	slog.InfoContext(ctx, "Saving HTML")
+
+	// Generate HTML content
+	htmlContent := c.HTMLGenerator.GenerateHTML(post, c.CreatorName)
+
+	// Save HTML
+	if err := c.Storage.SaveHTML(post, htmlContent); err != nil {
+		if c.SkipOnError {
+			slog.ErrorContext(ctx, "Skip saving HTML due to error", "error", err)
+			return nil
+		}
+		return fmt.Errorf("save HTML: %w", err)
+	}
+
+	// Handle gigafile and drive downloads if enabled
+	if c.GigafileDownloader != nil || c.DriveDownloader != nil {
+		c.handleExternalLinks(ctx, post, htmlContent)
+	}
+
+	return nil
+}
+
+// handleExternalLinks extracts and downloads external links (gigafile, Google Drive) from HTML content
+func (c *Client) handleExternalLinks(ctx context.Context, post Post, htmlContent string) {
+	// Extract save directory from storage
+	saveDir := c.Storage.makePostDir(post)
+
+	// Handle gigafile links
+	if c.GigafileDownloader != nil {
+		gigafileURLs := ExtractGigafileURLs(htmlContent)
+		if len(gigafileURLs) > 0 {
+			slog.InfoContext(ctx, "Found gigafile links", "count", len(gigafileURLs))
+			tasks := make([]func() error, 0, len(gigafileURLs))
+			for _, url := range gigafileURLs {
+				url := url
+				tasks = append(tasks, func() error {
+					slog.InfoContext(ctx, "Downloading gigafile", "url", url)
+					meta := DownloadStateMeta{
+						CreatorID: post.CreatorID,
+						PostID:    post.ID,
+						PostTitle: post.Title,
+						AssetType: "gigafile",
+						URL:       url,
+					}
+					if err := c.GigafileDownloader.DownloadFile(ctx, url, saveDir, meta); err != nil {
+						slog.ErrorContext(ctx, "Failed to download gigafile", "url", url, "error", err)
+					}
+					return nil
+				})
+			}
+			_ = c.runTasks(ctx, tasks)
+		}
+	}
+
+	// Handle Google Drive links
+	if c.DriveDownloader != nil {
+		driveURLs := ExtractDriveURLs(htmlContent)
+		if len(driveURLs) > 0 {
+			slog.InfoContext(ctx, "Found Google Drive links", "count", len(driveURLs))
+			tasks := make([]func() error, 0, len(driveURLs))
+			for _, url := range driveURLs {
+				url := url
+				tasks = append(tasks, func() error {
+					slog.InfoContext(ctx, "Downloading Google Drive file", "url", url)
+					meta := DownloadStateMeta{
+						CreatorID: post.CreatorID,
+						PostID:    post.ID,
+						PostTitle: post.Title,
+						AssetType: "drive",
+						URL:       url,
+					}
+					if err := c.DriveDownloader.DownloadFile(ctx, url, saveDir, meta); err != nil {
+						slog.ErrorContext(ctx, "Failed to download Google Drive file", "url", url, "error", err)
+					}
+					return nil
+				})
+			}
+			_ = c.runTasks(ctx, tasks)
+		}
+	}
+}
+
+// isWithinDateRange checks if post's published date is within the specified date range
 func (c *Client) isWithinDateRange(publishedDateTimeStr string) bool {
 	// If no date filters are set, include all posts
 	if c.StartDate == nil && c.EndDate == nil {
@@ -335,8 +615,20 @@ var ErrStatusForbidden = errors.New("status code 403")
 
 func (c *Client) download(ctx context.Context, post Post, order int, d Downloadable) error {
 	var resp *http.Response
+	filePath := c.Storage.makeFileName(post, order, d)
+	rangeStart, hasTemp, err := tempFileOffset(filePath)
+	if err != nil {
+		return fmt.Errorf("check temp file: %w", err)
+	}
+	if rangeStart < 0 {
+		rangeStart = 0
+	}
 
-	resp, err := c.OfficialAPIClient.Request(ctx, http.MethodGet, d.GetURL())
+	headers := map[string]string{}
+	if hasTemp && rangeStart > 0 {
+		headers["Range"] = fmt.Sprintf("bytes=%d-", rangeStart)
+	}
+	resp, err = c.OfficialAPIClient.RequestWithHeaders(ctx, http.MethodGet, d.GetURL(), headers)
 	if err != nil {
 		if errors.Is(err, ErrFailedToThumbnailing) {
 			slog.InfoContext(ctx, "The original file is not available (maybe it's a too large), so download a thumbnail instead", "original_file", d.GetURL())
@@ -350,6 +642,8 @@ func (c *Client) download(ctx context.Context, post Post, order int, d Downloada
 			if err != nil {
 				return fmt.Errorf("request error (%s): %w", tu, err)
 			}
+			rangeStart = 0
+			hasTemp = false
 		} else {
 			return fmt.Errorf("request error (%s): %w", d.GetURL(), err)
 		}
@@ -360,11 +654,45 @@ func (c *Client) download(ctx context.Context, post Post, order int, d Downloada
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode == http.StatusPartialContent {
+		if !hasTemp || rangeStart == 0 {
+			return fmt.Errorf("unexpected partial content response")
+		}
+	} else if resp.StatusCode != 200 {
 		if resp.StatusCode == 403 {
 			return ErrStatusForbidden
 		}
 		return fmt.Errorf("status code %d", resp.StatusCode)
+	}
+
+	if resp.StatusCode == http.StatusOK && hasTemp && rangeStart > 0 {
+		if err := os.Remove(tempFilePath(filePath)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove temp file: %w", err)
+		}
+		rangeStart = 0
+		hasTemp = false
+	}
+
+	if hasTemp && rangeStart > 0 {
+		assetType := "unknown"
+		switch d.(type) {
+		case Image:
+			assetType = "image"
+		case File:
+			assetType = "file"
+		}
+		meta := DownloadStateMeta{
+			CreatorID: post.CreatorID,
+			PostID:    post.ID,
+			PostTitle: post.Title,
+			AssetID:   d.GetID(),
+			AssetType: assetType,
+			URL:       d.GetURL(),
+		}
+		if err := saveReaderWithStateAt(ctx, filePath, resp.Body, meta, resp.ContentLength, 0775, rangeStart, true); err != nil {
+			return fmt.Errorf("save a file: %w", err)
+		}
+		return nil
 	}
 
 	if err := c.Storage.Save(post, order, d, resp.Body); err != nil {
@@ -372,4 +700,70 @@ func (c *Client) download(ctx context.Context, post Post, order int, d Downloada
 	}
 
 	return nil
+}
+
+func (c *Client) runTasks(ctx context.Context, tasks []func() error) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	workers := c.DownloadWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers == 1 {
+		for _, task := range tasks {
+			// Check context cancellation before each task
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if err := task(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	sem := make(chan struct{}, workers)
+	errCh := make(chan error, len(tasks))
+	doneCh := make(chan struct{})
+
+	// Wait group equivalent
+	go func() {
+		defer close(doneCh)
+		for _, task := range tasks {
+			select {
+			case <-ctx.Done():
+				// Context cancelled, push context error to signal early exit
+				errCh <- ctx.Err()
+				return
+			case sem <- struct{}{}:
+			}
+
+			task := task
+			go func() {
+				defer func() { <-sem }()
+				errCh <- task()
+			}()
+		}
+	}()
+
+	var firstErr error
+	completed := 0
+	for completed < len(tasks) {
+		select {
+		case <-ctx.Done():
+			// Context cancelled
+			return ctx.Err()
+		case <-doneCh:
+			// All tasks have been dispatched
+		case err := <-errCh:
+			completed++
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
